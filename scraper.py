@@ -43,14 +43,16 @@ class WebScraper:
             if self.driver:
                 self.driver.quit()
     
-    def extract_body_content(html_content):
+    def extract_body_content(self, html_content):
+        """Extract the body content from the HTML"""
         soup = BeautifulSoup(html_content, 'html.parser')
         body_content = soup.body
         if body_content:
             return str(body_content)
         return ""
-
-    def clean_body_content(body_content):
+    
+    def clean_body_content(self, body_content):
+        """Clean the body content by removing scripts, styles, and unwanted tags."""
         soup = BeautifulSoup(body_content, 'html.parser')
         for script in soup(["script", "style"]):
             script.decompose()
@@ -59,5 +61,6 @@ class WebScraper:
         cleaned_content = '\n'.join(line.strip() for line in cleaned_content.split('\n') if line.strip())
         return cleaned_content
     
-    def split_dom_content(dom_content, max_length=4000):
+    def split_dom_content(self, dom_content, max_length=4000):
+        """Split the DOM content into chunks."""
         return [dom_content[i:i + max_length] for i in range(0, len(dom_content), max_length)]
