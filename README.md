@@ -142,7 +142,7 @@ ollama pull llama3
 1. Clone the Repository
 ```bash
 git clone https://github.com/XenosWarlocks/LLM-Scraper.git
-cd llm-web-scraper
+cd LLM-Scraper-main
 ```
 2. Create Virtual Environment
 ```bash
