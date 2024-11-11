@@ -6,3 +6,7 @@ beautifulsoup4
 lxml 
 html5lib
 python-dotenv
+bs4
+requests
+langchain_google_genai
+google.generativeai

@@ -142,7 +142,7 @@ ollama pull llama3
 1. Clone the Repository
 ```bash
 git clone https://github.com/XenosWarlocks/LLM-Scraper.git
-cd LLM-Scraper-main
+cd llm-web-scraper
 ```
 2. Create Virtual Environment
 ```bash
@@ -151,8 +151,8 @@ python -m venv venv
 # For Windows
 .\venv\Scripts\activate
 
-# For Linux/macOS/Windows
-source venv/Scripts/activate
+# For Linux/macOS
+source venv/bin/activate
 ```
 
 3. Install Dependencies
