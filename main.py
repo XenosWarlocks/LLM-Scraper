@@ -13,6 +13,8 @@ import asyncio
 import aiohttp
 from typing import List, Tuple
 
+import websocket
+
 from parse import UnifiedParser
 from batch_processor import BatchURLProcessor, BatchProcessingResult
 from loader import ImageLoader
@@ -316,12 +318,8 @@ with left_col:
     
     with tab2:
         st.subheader("Batch URL Processing")
-        uploaded_file = st.file_uploader(
-            "Upload file containing URLs",
-            type=['txt', 'csv', 'xlsx', 'json'],
-            help="Supported formats: TXT (one URL per line), CSV, Excel, or JSON"
-        )
         
+        # Configure batch settings
         max_concurrent = st.slider(
             "Max Concurrent Processes",
             min_value=1,
@@ -339,103 +337,140 @@ with left_col:
         )
         
         uploaded_file = st.file_uploader(
-            "Upload file containing URLs",
-            type=['txt', 'csv', 'xlsx', 'json'],
-            help="Supported formats: TXT (one URL per line), CSV (with 'Model Number' and 'URL' columns), Excel, or JSON"
+            "Upload CSV file with Model Numbers and URLs",
+            type=['csv'],
+            help="CSV file must have two columns: 'Model Number' and 'URL'"
         )
         
         if uploaded_file:
-            temp_file_path, suffix = process_uploaded_file(uploaded_file)
-            if temp_file_path and suffix in BatchURLProcessor.SUPPORTED_FORMATS:
-                try:
-                    # 1. Initialize BatchURLProcessor
-                    # Initialize batch processor with correct parameters
-                    batch_processor = BatchURLProcessor(
-                        unified_parser=st.session_state.parser,  # Pass the UnifiedParser instance
-                        max_concurrent=max_concurrent,
-                        timeout=timeout,
-                        result_manager=st.session_state.csv_manager,
-                        default_model_number=model_number
-                    )
+            try:
+                # Preview the CSV data
+                df = pd.read_csv(uploaded_file)
+                if 'Model Number' not in df.columns or 'URL' not in df.columns:
+                    st.error("CSV must contain 'Model Number' and 'URL' columns")
+                else:
+                    st.write("Preview of uploaded data:")
+                    st.dataframe(df.head())
                     
-                    async def process_batch_async(urls: List[Tuple[str, str]], progress_bar) -> List[BatchProcessingResult]:
-                        """Process URLs asynchronously with progress tracking"""
-                        timeout = aiohttp.ClientTimeout(total=batch_processor.timeout)
-                        connector = aiohttp.TCPConnector(limit=batch_processor.max_concurrent)
-                        results = []
-                        total_urls = len(urls)
-                        
-                        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
-                            for i, (model_number, url) in enumerate(urls):
-                                try:
-                                    # Use the batch processor's process_url method
-                                    result = await batch_processor.process_url(
-                                        model_number=model_number,
-                                        url=url,
-                                        session=session
-                                    )
-                                    results.append(result)
-                                    
-                                    # Update progress
-                                    progress = (i + 1) / total_urls
-                                    progress_bar.progress(progress)
-                                    
-                                except Exception as e:
-                                    results.append(BatchProcessingResult(
-                                        url=url,
-                                        status='error',
-                                        downloaded_files={},
-                                        parsed_content='',
-                                        raw_content='',
-                                        error=str(e),
-                                        model_number=model_number
-                                    ))
-                        
-                        return results
+                    # Store the DataFrame in session state
+                    st.session_state.batch_df = df
+                    st.success(f"✅ Successfully loaded {len(df)} URLs from file.")
                     
-                    # 2. Read URLs from the temporary file
-                    urls = list(batch_processor.read_urls(temp_file_path))
-                    if urls:
-                        st.session_state.batch_urls = urls
-                        st.write(f"✅ Successfully loaded {len(urls)} URLs from file.")
-                                            
-                    # 3. Delete the temporary file
-                    os.remove(temp_file_path)
-                except Exception as e:
-                    st.error(f"Error loading URLs: {e}")
-                    if os.path.exists(temp_file_path):
-                        os.remove(temp_file_path)
-            else:
-                st.error(f"Unsupported file format. Please upload a file with one of these extensions: {', '.join(BatchURLProcessor.SUPPORTED_FORMATS)}")
+            except Exception as e:
+                st.error(f"Error reading CSV file: {str(e)}")
         
-        if st.session_state.batch_urls:  # Check if URLs are loaded
-            # Button should be at the same level as the URL loading logic
-            if st.button("🚀 Start Batch Processing"):
-                st.session_state.batch_processing = True
-                with st.spinner("Processing URLs in batch..."):
-                    try:
-                        progress_bar = st.progress(0)
-            
-                        # Process URLs asynchronously
-                        results = asyncio.run(process_batch_async(
-                            urls=st.session_state.batch_urls,
-                            progress_bar=progress_bar
-                        ))
+        # Add the batch processing button
+        if st.button("🚀 Start Batch Processing", key="batch_process_with_file") and 'batch_df' in st.session_state:
+            with st.spinner("Initializing batch processing..."):
+                try:
+                    # Create form data with configuration
+                    config = {
+                        'max_concurrent': max_concurrent,
+                        'timeout': timeout
+                    }
+                    
+                    # Reset uploaded file position
+                    uploaded_file.seek(0)
+                    files = {
+                        'file': ('batch.csv', uploaded_file, 'text/csv'),
+                        'config': ('config.json', json.dumps(config), 'application/json')
+                    }
+                    
+                    # Send to Go backend
+                    response = requests.post('http://localhost:8080/upload', files=files)
+                    if response.status_code == 200:
+                        batch_id = response.json()['batch_id']
+                        st.session_state.current_batch_id = batch_id
+                        st.success(f"Batch processing started! Batch ID: {batch_id}")
                         
-                        st.session_state.batch_results = results
+                        # Create containers for dynamic updates
+                        progress_container = st.container()
+                        metrics_container = st.container()
+                        details_container = st.container()
                         
-                        # Count successful and failed results
-                        successful = len([r for r in results if r.status == 'success'])
-                        failed = len([r for r in results if r.status == 'error'])
+                        with progress_container:
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
                         
-                        st.success(f"✅ Batch processing completed! Successfully processed {successful} URLs with {failed} failures.")
+                        with metrics_container:
+                            col1, col2, col3 = st.columns(3)
+                            total_metric = col1.empty()
+                            success_metric = col2.empty()
+                            failed_metric = col3.empty()
                         
-                    except Exception as e:
-                        st.error(f"❌ Batch processing error: {str(e)}")
-                    finally:
-                        st.session_state.batch_processing = False
-        else:
-            st.info("Please upload a file with URLs first.")
+                        # Initialize WebSocket connection
+                        ws = websocket.WebSocket()
+                        ws.connect(f"ws://localhost:8080/ws?batch_id={batch_id}")
+                        
+                        try:
+                            while True:
+                                result = json.loads(ws.recv())
+                                
+                                # Update progress
+                                progress = result.get('progress', 0)
+                                progress_bar.progress(progress / 100.0)
+                                
+                                # Update status
+                                status = result.get('status', '')
+                                status_text.markdown(f"**Status:** {status}")
+                                
+                                # Update metrics
+                                jobs = result.get('jobs', [])
+                                total = len(jobs)
+                                successful = sum(1 for job in jobs if job['status'] == 'completed')
+                                failed = sum(1 for job in jobs if job['status'] == 'failed')
+                                
+                                total_metric.metric("Total URLs", total)
+                                success_metric.metric("Successful", successful)
+                                failed_metric.metric("Failed", failed)
+                                
+                                # Update job details table
+                                with details_container:
+                                    jobs_df = pd.DataFrame(jobs)
+                                    st.dataframe(
+                                        jobs_df[['model_number', 'url', 'status', 'error', 'progress']],
+                                        use_container_width=True
+                                    )
+                                
+                                if status == 'completed':
+                                    # Create download buttons for results
+                                    st.success("✅ Batch processing completed!")
+                                    
+                                    # Prepare download data
+                                    report_df = pd.DataFrame(jobs)
+                                    csv_data = report_df.to_csv(index=False)
+                                    json_data = report_df.to_json(orient='records')
+                                    
+                                    col1, col2 = st.columns(2)
+                                    with col1:
+                                        st.download_button(
+                                            "📥 Download CSV Report",
+                                            csv_data,
+                                            f"batch_results_{batch_id}.csv",
+                                            "text/csv"
+                                        )
+                                    with col2:
+                                        st.download_button(
+                                            "📥 Download JSON Report",
+                                            json_data,
+                                            f"batch_results_{batch_id}.json",
+                                            "application/json"
+                                        )
+                                    break
+                                    
+                        except websocket.WebSocketConnectionClosedException:
+                            st.error("Connection to server lost")
+                        finally:
+                            ws.close()
+                            
+                    else:
+                        st.error(f"Error starting batch process: {response.text}")
+                        
+                except Exception as e:
+                    st.error(f"Error during batch processing: {str(e)}")
+        
+        elif st.button("🚀 Start Batch Processing", key="batch_process_no_file"):
+            st.warning("Please upload a CSV file first.")
 
 # Right column - display results after analysis
 with right_col:
@@ -626,23 +661,27 @@ with right_col:
                     st.markdown("---")
             
             # Download results
-            if st.button("📥 Download Results Report"):
-                report = pd.DataFrame([{
-                    'URL': r.url,
-                    'Status': r.status,
-                    'Error': r.error,
-                    'Files Downloaded': sum(len(files) for files in r.downloaded_files.values()),
-                    'Content Length': len(r.parsed_content) if r.parsed_content else 0
-                } for r in results])
-                
-                csv = report.to_csv(index=False)
-                st.download_button(
-                    "📥 Download CSV",
-                    csv,
-                    "batch_results.csv",
-                    "text/csv",
-                    key='download-csv'
-                )
+            if st.button("📥 Download Results Report", key="download_results"):
+                # Check if batch results exist
+                if st.session_state.batch_results:
+                    report = pd.DataFrame([{
+                        'URL': r['url'],
+                        'Status': r['status'],
+                        'Error': r['error'],
+                        'Files Downloaded': len(r.get('downloaded_files', [])),
+                        'Content Length': len(r.get('raw_content', '')) if r.get('raw_content') else 0
+                    } for r in st.session_state.batch_results])
+                    
+                    csv = report.to_csv(index=False)
+                    st.download_button(
+                        "📥 Download CSV",
+                        csv,
+                        "batch_results.csv",
+                        "text/csv",
+                        key='download_csv_button'
+                    )
+                else:
+                    st.warning("No batch results available to download.")
 
 # Footer
 st.markdown("---")

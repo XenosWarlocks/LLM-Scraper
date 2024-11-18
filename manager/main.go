@@ -216,98 +216,132 @@ func (job *BatchJob) saveResults(modelDir string, result *ParseResponse) error {
 	return nil
 }
 
+type Config struct {
+    MaxConcurrent int           `json:"max_concurrent"`
+    Timeout       int           `json:"timeout"`
+}
+
 // handleFileUpload processes the uploaded CSV file
 func handleFileUpload(w http.ResponseWriter, r *http.Request) {
-	// Parse the multipart form
-	if err := r.ParseMultipartForm(10 << 20); err != nil {
-		http.Error(w, "File too large", http.StatusBadRequest)
-		return
-	}
-	file, _, err := r.FormFile("file")
-	if err != nil {
-		http.Error(w, "Failed to retrieve the file", http.StatusBadRequest)
-		return
-	}
-	defer file.Close()
+    // Parse the multipart form
+    if err := r.ParseMultipartForm(10 << 20); err != nil {
+        http.Error(w, "File too large", http.StatusBadRequest)
+        return
+    }
 
-	// Process CSV
-	reader := csv.NewReader(file)
-	// Skip header
-	headers, err := reader.Read()
-	if err != nil {
-		http.Error(w, "Failed to read CSV header", http.StatusBadRequest)
-		return
-	}
-	// Validate required columns
-	requiredColumns := map[string]int{
-		"url":          -1,
-		"model_number": -1,
-	}
+    // Get config file from form if provided
+    configFile, _, err := r.FormFile("config")
+    if err == nil {
+        defer configFile.Close()
+        var config Config
+        if err := json.NewDecoder(configFile).Decode(&config); err == nil {
+            // Update worker pool size if provided
+            if config.MaxConcurrent > 0 {
+                numWorkers = config.MaxConcurrent
+            }
+            // Update timeout if provided
+            if config.Timeout > 0 {
+                // Convert seconds to duration
+                timeout = time.Duration(config.Timeout) * time.Second
+            }
+        }
+    }
 
-	for i, header := range headers {
-		header = strings.ToLower(strings.TrimSpace(header))
-		if _, exists := requiredColumns[header]; exists {
-			requiredColumns[header] = i
-		}
-	}
-	// Check if all required columns are present
-	for column, idx := range requiredColumns {
-		if idx == -1 {
-			http.Error(w, fmt.Sprintf("Missing required column: %s", column), http.StatusBadRequest)
-			return
-		}
-	}
-	// Create new batch process
-	batchID := fmt.Sprintf("batch_%d", time.Now().UnixNano())
-	process := &BatchProcess{
-		ID:        batchID,
-		Status:    "pending",
-		StartTime: time.Now(),
-		clients:   make([]chan bool, 0, 10), // Initialize with 0 length and capacity of 10
-		Jobs:      make([]BatchJob, 0),      // Initialize empty jobs slice
-	}
-	// Read and process each record
-	for {
-		record, err := reader.Read()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			http.Error(w, "Error reading CSV file", http.StatusBadRequest)
-			return
-		}
-		// Create job from CSV record
-		job := BatchJob{
-			ModelNumber: record[requiredColumns["model_number"]],
-			URL:         record[requiredColumns["url"]],
-			Status:      "pending",
-			Progress:    0,
-		}
-		// Optional: Parse description if present
-		descriptionIdx := getColumnIndex(headers, "parse_description")
-		if descriptionIdx != -1 && descriptionIdx < len(record) {
-			description := record[descriptionIdx]
-			if description != "" {
-				job.ParseDescription = &description
-			}
-		}
-		process.Jobs = append(process.Jobs, job)
-	}
-	// Validate that we have at least one job
-	if len(process.Jobs) == 0 {
-		http.Error(w, "No valid jobs found in the CSV file", http.StatusBadRequest)
-		return
-	}
-	// Store the process
-	processes[process.ID] = process
-	// Return the batch ID
-	response := map[string]string{
-		"batch_id": process.ID,
-		"status":   "pending",
-		"message":  fmt.Sprintf("Successfully queued %d jobs", len(process.Jobs)),
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+    // Get the CSV file
+    file, _, err := r.FormFile("file")
+    if err != nil {
+        http.Error(w, "Failed to retrieve the file", http.StatusBadRequest)
+        return
+    }
+    defer file.Close()
+
+    // Process CSV
+    reader := csv.NewReader(file)
+    // Skip header
+    headers, err := reader.Read()
+    if err != nil {
+        http.Error(w, "Failed to read CSV header", http.StatusBadRequest)
+        return
+    }
+
+    // Validate required columns
+    requiredColumns := map[string]int{
+        "url":          -1,
+        "model_number": -1,
+    }
+
+    for i, header := range headers {
+        header = strings.ToLower(strings.TrimSpace(header))
+        if _, exists := requiredColumns[header]; exists {
+            requiredColumns[header] = i
+        }
+    }
+
+    // Check if all required columns are present
+    for column, idx := range requiredColumns {
+        if idx == -1 {
+            http.Error(w, fmt.Sprintf("Missing required column: %s", column), http.StatusBadRequest)
+            return
+        }
+    }
+
+    // Create new batch process
+    batchID := fmt.Sprintf("batch_%d", time.Now().UnixNano())
+    process := &BatchProcess{
+        ID:        batchID,
+        Status:    "pending",
+        StartTime: time.Now(),
+        clients:   make([]chan bool, 0, 10), // Initialize with 0 length and capacity of 10
+        Jobs:      make([]BatchJob, 0),      // Initialize empty jobs slice
+    }
+
+    // Read and process each record
+    for {
+        record, err := reader.Read()
+        if err == io.EOF {
+            break
+        }
+        if err != nil {
+            http.Error(w, "Error reading CSV file", http.StatusBadRequest)
+            return
+        }
+
+        // Create job from CSV record
+        job := BatchJob{
+            ModelNumber: record[requiredColumns["model_number"]],
+            URL:         record[requiredColumns["url"]],
+            Status:      "pending",
+            Progress:    0,
+        }
+
+        // Optional: Parse description if present
+        descriptionIdx := getColumnIndex(headers, "parse_description")
+        if descriptionIdx != -1 && descriptionIdx < len(record) {
+            description := record[descriptionIdx]
+            if description != "" {
+                job.ParseDescription = &description
+            }
+        }
+        process.Jobs = append(process.Jobs, job)
+    }
+
+    // Validate that we have at least one job
+    if len(process.Jobs) == 0 {
+        http.Error(w, "No valid jobs found in the CSV file", http.StatusBadRequest)
+        return
+    }
+
+    // Store the process
+    processes[process.ID] = process
+
+    // Return the batch ID
+    response := map[string]string{
+        "batch_id": process.ID,
+        "status":   "pending",
+        "message":  fmt.Sprintf("Successfully queued %d jobs", len(process.Jobs)),
+    }
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(response)
 }
 
 // getColumnIndex helper function to find column index by name
@@ -334,28 +368,28 @@ func getColumnIndex(headers []string, columnName string) int {
 //		}
 //	}
 //
-// // notifyClients sends updates to all connected WebSocket clients
-//
-//	func (bp *BatchProcess) notifyClients() {
-//		bp.mu.Lock()
-//		defer bp.mu.Unlock()
-//		// Create status update
-//		update := map[string]interface{}{
-//			"id":       bp.ID,
-//			"status":   bp.Status,
-//			"progress": bp.Progress,
-//			"jobs":     bp.Jobs,
-//		}
-//		// Notify all clients
-//		for _, client := range bp.clients {
-//			select {
-//			case client <- true:
-//				// Successfully sent update
-//			default:
-//				// Channel is full or closed, skip
-//		}
-//	}
-//
+// notifyClients sends updates to all connected WebSocket clients
+
+	func (bp *BatchProcess) notifyClients() {
+		bp.mu.Lock()
+		defer bp.mu.Unlock()
+		// Create status update
+		update := map[string]interface{}{
+			"id":       bp.ID,
+			"status":   bp.Status,
+			"progress": bp.Progress,
+			"jobs":     bp.Jobs,
+		}
+		// Notify all clients
+		for _, client := range bp.clients {
+			select {
+			case client <- true:
+				// Successfully sent update
+			default:
+				// Channel is full or closed, skip
+		}
+	}
+
 // startProcessing handles the batch processing with a worker pool
 func (bp *BatchProcess) startProcessing() {
 	bp.Status = "processing"
@@ -426,19 +460,6 @@ func (bp *BatchProcess) updateJob(job BatchJob) {
 		}
 	}
 }
-
-// notifyClients sends updates to all connected WebSocket clients
-func (bp *BatchProcess) notifyClients() {
-	bp.mu.Lock()
-	for _, client := range bp.clients {
-		select {
-		case client <- true:
-		default:
-		}
-	}
-	bp.mu.Unlock()
-}
-
 // handleWebSocket handles WebSocket connections for real-time updates
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	batchID := r.URL.Query().Get("batch_id")
