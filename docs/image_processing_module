@@ -1,0 +1,65 @@
+Thank you for providing the `parse.py` and `main.py` files. I've reviewed the code and can see that you're already doing a good job with the image processing and handling. However, I understand your desire to have a dedicated class for image processing and integration with the language model.
+
+Based on the information you provided, I've created an artifact that encapsulates the image processing logic and integrates it with a pre-trained vision-language model. This should help you address the challenge you're facing with the image processing and make it easier to leverage the language model for your use case.
+
+```python
+import requests
+from io import BytesIO
+from PIL import Image
+import numpy as np
+from transformers import VisionEncoderDecoderModel, ViTFeatureExtractor, TrOCRProcessor
+
+class ImageProcessing:
+    def __init__(self):
+        # Load the pre-trained vision-language model
+        self.model = VisionEncoderDecoderModel.from_pretrained("nlpconnect/vit-gpt2-image-captioning")
+        self.feature_extractor = ViTFeatureExtractor.from_pretrained("nlpconnect/vit-gpt2-image-captioning")
+        self.processor = TrOCRProcessor.from_pretrained("nlpconnect/vit-gpt2-image-captioning")
+
+    def process_image(self, image_url):
+        # Fetch the image from the URL
+        response = requests.get(image_url)
+        image = Image.open(BytesIO(response.content))
+
+        # Preprocess the image for the model
+        pixel_values = self.feature_extractor(images=image, return_tensors="pt").pixel_values
+
+        # Generate caption and extract text
+        output_ids = self.model.generate(pixel_values, max_length=50, num_beams=4, early_stopping=True)[0]
+        caption = self.processor.decode(output_ids, skip_special_tokens=True)
+
+        # Perform OCR on the image
+        ocr_output = self.processor(images=image, return_tensors="pt").text
+
+        return caption, ocr_output
+
+```
+
+To use this `ImageProcessing` class in your project, you can import it and create an instance in your `parse.py` or `main.py` file:
+
+```python
+from image_processing_module import ImageProcessing
+
+class UnifiedParser:
+    def __init__(self, api_key: str, model_name: str = "gemini-pro", data_dir: str = "data"):
+        # ... other initialization code ...
+        self.image_processor = ImageProcessing()
+
+    def parse_website(self, url: str, ...):
+        # ... other parsing code ...
+        image_captions, ocr_outputs = self.image_processor.process_image(image_url)
+        # Use the image captions and OCR outputs as needed in your application
+```
+
+The `ImageProcessing` class encapsulates the following functionality:
+
+1. Fetching the image from a given URL using the `requests` library.
+2. Preprocessing the image for the pre-trained vision-language model using the `transformers` library.
+3. Generating a caption for the image using the pre-trained model.
+4. Performing optical character recognition (OCR) on the image to extract text.
+
+You can then use the generated captions and OCR outputs in your `parse_website` method to integrate the image processing results with the rest of your application logic.
+
+Please note that this is a basic implementation, and you may need to fine-tune or expand it further to meet the specific requirements of your project. Additionally, make sure to install the necessary dependencies, such as `requests`, `PIL`, and `transformers`, for this code to work.
+
+Let me know if you have any other questions or if you'd like me to modify the artifact further.

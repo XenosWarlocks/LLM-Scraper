@@ -1,0 +1,7 @@
+model_name: "gemini-pro"
+data_dir: "./data"
+chunk_size: 1024
+min_confidence: 0.75
+allowed_extensions: [".pdf", ".docx", ".jpg"]
+max_retries: 3
+timeout: 30

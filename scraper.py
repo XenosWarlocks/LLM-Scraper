@@ -1,3 +1,4 @@
+# unused
 # scraper.py
 from selenium.webdriver import Remote, ChromeOptions
 from selenium import webdriver

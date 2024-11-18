@@ -1,0 +1,4 @@
+tasklist | findstr ollama.exe
+taskkill /PID <PID> /F
+netstat -ano | findstr :11434
+taskkill //PID 11304 //F

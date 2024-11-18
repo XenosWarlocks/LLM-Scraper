@@ -1,0 +1,300 @@
+
+### **Step 1: Define a Central Orchestrator**
+- Create a **main orchestration script** that coordinates the flow:
+  - Fetch model numbers from the e-commerce site.
+  - Perform Google searches using the model numbers to gather URLs.
+  - Extract data (title, images, brand, PDF manuals, etc.) from the retrieved URLs.
+  - Upload the gathered data to the e-commerce site.
+
+- This orchestrator can be implemented in Python and could utilize a task scheduler (like `APScheduler` or `Celery`) for batch processing, ensuring each task is performed in sequence or parallel where needed.
+
+### **Step 2: Batch Processing Pipeline**
+- **Input Handling**: Collect a list of model numbers and process them in batches to avoid rate limits and improve efficiency.
+- **Parallel Execution**:
+  - Use `concurrent.futures` or Python’s `multiprocessing` module to handle parallel tasks (e.g., scraping multiple URLs at once).
+- Implement error handling and logging to keep track of failed batches and retry them if needed.
+
+### **Step 3: Integrate Existing Components**
+- **Component 1: Model Number Fetcher**
+  - This module retrieves model numbers from the e-commerce site. Make it the first step in your orchestrator.
+- **Component 2: Data Extractor**
+  - For each model number, use your Google search component to find relevant URLs.
+  - Extract the required data (title, images, brand, PDFs) from the identified URLs.
+- **Component 3: Data Uploader**
+  - Once the data is extracted, automate the upload to the e-commerce site.
+  - Use Selenium or direct API requests (if the site supports it) for uploading.
+
+### **Step 4: Automate the Upload Process**
+- If the e-commerce site has a web interface, use **Selenium** to log in and upload content.
+- For more efficient automation, check if the e-commerce platform offers an API for uploading product information. This would be much faster and less error-prone than a UI-based approach.
+
+### **Step 5: Centralized Configuration**
+- Store configurations (e.g., login credentials, batch sizes, and endpoints) in a `.env` file or a centralized configuration JSON/YAML file.
+- Use environment variables to securely manage sensitive information.
+
+### **Step 6: Error Handling & Recovery**
+- Implement robust exception handling in each component to catch issues like failed scrapes, invalid URLs, or upload errors.
+- Maintain a log of successful and failed operations to retry failed ones in the next batch cycle.
+
+### **Step 7: Testing and Debugging**
+- Before running the entire pipeline, test each module in isolation.
+- Use mock data and a staging environment for the e-commerce site if possible to avoid impacting live operations.
+
+### **High-Level Workflow Example**
+```python
+def main():
+    model_numbers = fetch_model_numbers()
+    for model_number in model_numbers:
+        try:
+            urls = search_google_for_urls(model_number)
+            for url in urls:
+                data = extract_data_from_url(url)
+                if data:
+                    upload_to_ecommerce_site(data)
+        except Exception as e:
+            log_error(f"Failed for model {model_number}: {e}")
+
+if __name__ == "__main__":
+    main()
+```
+
+This approach should help you integrate your components and automate the entire workflow. Let me know if you need a more detailed breakdown of any specific part!
+
+```python
+from langchain_google_genai import ChatGoogleGenerativeAI
+import google.generativeai as genai
+from langchain_core.prompts import ChatPromptTemplate
+from bs4 import BeautifulSoup
+from typing import Optional, List, Dict, Tuple
+import logging
+import os
+import hashlib
+from urllib.parse import urlparse
+import mimetypes
+import json
+import sqlite3
+from dataclasses import dataclass
+from datetime import datetime
+
+@dataclass
+class ImageMatch:
+    url: str
+    confidence_score: float
+    context: str
+    category: str
+    timestamp: str
+
+class ContentAnalyzer:
+    def __init__(self):
+        self.db_path = "data/image_learning.db"
+        self._init_db()
+    
+    def _init_db(self):
+        """Initialize SQLite database for learning patterns"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS image_matches (
+                id INTEGER PRIMARY KEY,
+                category TEXT,
+                image_url TEXT,
+                context TEXT,
+                confidence_score REAL,
+                user_validated BOOLEAN,
+                timestamp DATETIME
+            )
+        ''')
+        conn.commit()
+        conn.close()
+
+    def learn_from_match(self, category: str, image_url: str, context: str, 
+                        user_validated: bool, confidence_score: float):
+        """Store learning data from user interactions"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO image_matches 
+            (category, image_url, context, confidence_score, user_validated, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (category, image_url, context, confidence_score, user_validated, 
+              datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+
+class EnhancedGeminiParser(GeminiParser):
+    def __init__(self, api_key: str, model_name: str = "gemini-pro", 
+                 download_dir: str = "downloads"):
+        super().__init__(api_key, model_name, download_dir)
+        self.content_analyzer = ContentAnalyzer()
+        
+        # Enhanced prompt for better content understanding
+        self.content_analysis_prompt = ChatPromptTemplate.from_template("""
+            Analyze the following content and extract key information:
+            1. Main product/topic identification
+            2. Key features and specifications
+            3. Related categories and terms
+            4. Important context clues
+
+            Content: {content}
+
+            Provide the analysis in the following JSON format:
+            {
+                "main_topic": "",
+                "category": "",
+                "key_features": [],
+                "specifications": {},
+                "related_terms": [],
+                "context": ""
+            }
+        """)
+        
+        # Image matching prompt
+        self.image_matching_prompt = ChatPromptTemplate.from_template("""
+            Given the following content context and image information,
+            evaluate how well each image matches the content:
+
+            Content Context: {content_context}
+            Image Context: {image_context}
+
+            Rate the match on a scale of 0-1 and explain why.
+            Format: JSON
+            {
+                "confidence_score": 0.0,
+                "reasoning": "",
+                "category_match": true/false
+            }
+        """)
+
+    async def analyze_page_content(self, html_content: str) -> Dict:
+        """Analyze page content for better understanding"""
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Extract meaningful content
+            title = soup.title.string if soup.title else ""
+            main_content = ' '.join([p.text for p in soup.find_all(['p', 'h1', 'h2', 'h3'])])
+            
+            # Get AI analysis
+            chain = self.content_analysis_prompt | self.model
+            response = chain.invoke({
+                "content": f"Title: {title}\n\nContent: {main_content}"
+            })
+            
+            return json.loads(response.content)
+            
+        except Exception as e:
+            logging.error(f"Error analyzing content: {str(e)}")
+            return {}
+
+    async def find_matching_images(self, html_content: str, 
+                                 content_analysis: Dict) -> List[ImageMatch]:
+        """Find relevant images based on content analysis"""
+        soup = BeautifulSoup(html_content, 'html.parser')
+        matches = []
+
+        for img in soup.find_all('img'):
+            src = img.get('src')
+            if not src or not (src.startswith('http://') or src.startswith('https://')):
+                continue
+
+            # Get image context
+            alt_text = img.get('alt', '')
+            parent_text = ' '.join(p.text for p in img.find_parents(['p', 'div']) if p.text)
+            
+            # Evaluate image match
+            chain = self.image_matching_prompt | self.model
+            response = chain.invoke({
+                "content_context": json.dumps(content_analysis),
+                "image_context": f"Alt: {alt_text}\nContext: {parent_text}"
+            })
+            
+            match_info = json.loads(response.content)
+            
+            if match_info['confidence_score'] > 0.6:  # Threshold for relevance
+                matches.append(ImageMatch(
+                    url=src,
+                    confidence_score=match_info['confidence_score'],
+                    context=match_info['reasoning'],
+                    category=content_analysis['category'],
+                    timestamp=datetime.now().isoformat()
+                ))
+
+        return sorted(matches, key=lambda x: x.confidence_score, reverse=True)
+
+    def learn_from_user_selection(self, image_match: ImageMatch, 
+                                user_approved: bool):
+        """Learn from user's image selection"""
+        self.content_analyzer.learn_from_match(
+            category=image_match.category,
+            image_url=image_match.url,
+            context=image_match.context,
+            user_validated=user_approved,
+            confidence_score=image_match.confidence_score
+        )
+
+    def get_similar_past_matches(self, category: str, limit: int = 5) -> List[str]:
+        """Retrieve similar matches from learning database"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute('''
+            SELECT image_url, confidence_score
+            FROM image_matches
+            WHERE category = ? AND user_validated = 1
+            ORDER BY confidence_score DESC
+            LIMIT ?
+        ''', (category, limit))
+        results = c.fetchall()
+        conn.close()
+        return [url for url, _ in results]
+```
+```python
+# In main.py, add this section after content parsing
+
+if st.session_state.scraping_completed and "dom_content" in st.session_state:
+    # Content Analysis Section
+    with st.expander("🔍 Content Analysis", expanded=True):
+        try:
+            content_analysis = parser.analyze_page_content(st.session_state.dom_content)
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("📋 Content Summary")
+                st.json(content_analysis)
+            
+            with col2:
+                st.write("🎯 Category Learning")
+                if 'category' in content_analysis:
+                    similar_images = parser.get_similar_past_matches(
+                        content_analysis['category']
+                    )
+                    if similar_images:
+                        st.write("Previously matched images in this category:")
+                        for img_url in similar_images:
+                            st.image(img_url, width=100)
+    
+    # Image Matching Section
+    with st.expander("🖼️ Related Images", expanded=True):
+        image_matches = parser.find_matching_images(
+            st.session_state.dom_content,
+            content_analysis
+        )
+        
+        if image_matches:
+            st.write(f"Found {len(image_matches)} potentially relevant images")
+            
+            for idx, match in enumerate(image_matches):
+                cols = st.columns([2, 3, 1])
+                with cols[0]:
+                    st.image(match.url, width=200)
+                with cols[1]:
+                    st.write(f"Confidence: {match.confidence_score:.2f}")
+                    st.write(f"Context: {match.context}")
+                with cols[2]:
+                    if st.button("✅ Confirm Match", key=f"confirm_{idx}"):
+                        parser.learn_from_user_selection(match, True)
+                        st.success("Learned from selection!")
+                    if st.button("❌ Not Relevant", key=f"reject_{idx}"):
+                        parser.learn_from_user_selection(match, False)
+                        st.info("Noted as irrelevant")
+                st.markdown("---")
+```
