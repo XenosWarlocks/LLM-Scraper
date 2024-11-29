@@ -1,0 +1,25 @@
+package main
+
+import (
+	"io"
+	"net/http"
+	"strings"
+)
+
+func greet() string {
+	URL := "https://raw.githubusercontent.com/dmfed/go-exercises/master/hello.txt"
+	resp, err := http.Get(URL)
+	defer resp.Body.Close()
+	if err != nil {
+		return "Oh, noooo. Could not connect to the internet!"
+	}
+	out, _ := io.ReadAll(resp.Body)
+	return strings.Trim(string(out), "\n")
+}
+
+func main() {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(greet()))
+	})
+	http.ListenAndServe(":8080", nil)
+}
