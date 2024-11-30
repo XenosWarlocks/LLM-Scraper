@@ -21,6 +21,12 @@ from utils.parse_config import ParserConfig
 from utils.url_validator import URLValidator
 from utils.parse_result import ParseResult
 
+from utils.prompt_utils import (
+    get_temperature, 
+    get_output_expectations, 
+    enhance_parse_description
+)
+
 from content_analyzer import ContentAnalyzer, ImageMatch
 from unified_scraper import UnifiedScraper
 from site_scraper import SiteScraper
@@ -60,27 +66,15 @@ class UnifiedParser:
         # Updated prompt template that handles both structured and free-form queries
         self.prompt = ChatPromptTemplate.from_template(
             """
-            Analyze the following website content and extract relevant information based on the query.
-            
+            Task Context: {task_type}
             Website Content: {dom_content}
             
-            Query: {parse_description}
+            User Request: {parse_description}
             
-            For product information queries, include details about:
-            - Product name
-            - Model number
-            - Serial number
-            - Warranty information
-            - User manuals (with URLs if available)
-            - Other relevant documents (with URLs if available)
+            Output Guidelines:
+            {output_expectations}
             
-            For other queries:
-            - Provide relevant information from the content
-            - Include specific data points when found
-            - Return document/image URLs when relevant
-            - Indicate if information is not found
-            
-            Please provide the information in a clear, structured format.
+            Analyze the content thoroughly and respond accordingly.
             """
         )
 
@@ -285,10 +279,38 @@ class UnifiedParser:
         )
 
     @rate_limit(calls=10, period=60) # 10 calls per minute
-    def parse_with_gemini(self, dom_chunks: List[str], parse_description: str) -> dict:
+    def parse_with_gemini(
+        self,
+        dom_chunks: List[str],
+        parse_description: str,
+        task_type: str = 'content_analysis',
+        creativity_level: float = 1,
+        **kwargs
+    ) -> dict:
         """Parse content chunks using Gemini with more flexible response handling"""
-        chain = self.prompt | self.model
+        # Enhance parse description
+        enhanced_description = enhance_parse_description(
+            parse_description, 
+            task_type
+        )
+        
+        # Determine appropriate temperature
+        temperature = get_temperature(task_type, creativity_level)
+        
+        # Get output expectations
+        output_expectations = get_output_expectations(task_type)
+        
+        # Modify the model to use dynamic temperature
+        dynamic_model = ChatGoogleGenerativeAI(
+            model=self.config.model_name, 
+            temperature=temperature
+        )
+        
+        # Prepare the chain with enhanced context
+        chain = self.prompt | dynamic_model
+        
         found_results = []
+        chunk_size = 3
         
         is_product_info = any(keyword in parse_description.lower() 
                             for keyword in ['extract product', 'product information', 'product details'])
@@ -298,8 +320,10 @@ class UnifiedParser:
             chunk_group = " ".join(dom_chunks[i:i + chunk_size])
             try:
                 response = chain.invoke({
+                    "task_type": task_type,
                     "dom_content": chunk_group,
-                    "parse_description": parse_description
+                    "parse_description": enhanced_description,
+                    "output_expectations": output_expectations,
                 })
                 
                 # Extract content from response
