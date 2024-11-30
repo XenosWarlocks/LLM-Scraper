@@ -16,3 +16,4 @@ websocket-client
 gunicorn
 flask
 python-dotenv
+tldextract
